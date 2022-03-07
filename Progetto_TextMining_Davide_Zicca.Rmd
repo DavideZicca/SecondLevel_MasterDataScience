@@ -1,0 +1,388 @@
+---
+title: "Progetto: Text Mining"
+subtitle: "Elezioni Presidenziali USA - Tweets"
+author: "Davide Zicca"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 4
+    code_folding: hide
+    theme: cosmo
+    highlight: tango
+date: "5/7/2021"
+---
+
+# Motivazione e caricamento dati
+
+Fulcro di tale progetto è l'analisi dei tweet postati tra Gennaio e Setrembre 2016 a proposito della campagna presidenziale negli Stati Uniti d'America. Di seguito, la fonte dei dati: https://www.kaggle.com/benhamner/clinton-trump-tweets. 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(knitr)
+library(tidyr)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(tibble)
+library(stringr)
+library(gridExtra)
+library(scales)
+library(lubridate)
+library(ggrepel)
+library(reshape2)
+library(kableExtra)
+library(tm)
+library(wordcloud)
+library(tidytext)
+library(broom)
+library(topicmodels)
+setwd("C:/Davide/MASTER IN DATA SCIENCE/Materiale del Master/Text Mining/Progetto")
+# Fonte: https://www.kaggle.com/benhamner/clinton-trump-tweets
+tweets <- as_tibble(data.table::fread("tweets.csv", encoding= "UTF-8"))
+```
+
+Il dataset contiene 6444 tweets e 28 variabili.
+<ul>
+<li>Hillary Clinton e/o Donald Trump sono presenti in tutti i tweets</li>
+<li>Se "original_author" non prende valore, allora "original_author" è Hillary Clinton o Donald Trump</li>
+<li>Se "original_author" ha un valore assegnato, allora Hillary Clinton o Donald Trump hanno ritweetato.</li>
+</ul>
+
+Descrizione step eseguiti:
+
+Dopo aver eseguito text clenaning usando <strong><em>dplyr</em></strong>, ho creato oggetti <strong><em>vcorpus</em></strong> con il pacchetto <strong><em>tm</em></strong> e ho usato le funzioni di pulizia di questo pacchetto per pulire ulteriormente il testo (rimozione parole non significative). Utilizzando un <strong><em>TermsFrequencyMatrix</em></strong>, ho creato grafici delle parole più usate sia da Clinton che da Trump, e ho anche aggiunto "wordcloud" per entrambi i candidati. Oltre alle nuvole di parole di base delle parole più usate, ho anche aggiunto una "nuvola di confronto" che traccia la differenza nell'uso delle parole da parte di entrambi i candidati.
+
+Usando <strong><em>tidytext</em></strong>, ho convertito gli oggetti del corpus in ordinati dataframe per poi creare bigrammi (combinazioni di 2 parole più utilizzate) per entrambi i candidati e ho anche fatto la <strong><em>sentiment analysis</em></strong> utilizzando il lessico <strong><em>bing</em></strong>: creando grafici delle parole positive e negative più usate. Inoltre, ho eseguito una <strong><em>sentiment analysis</em></strong> delle serie temporali basata sul lessico <strong><em>bing</em></strong>.
+    
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+tweets$time <- ymd_hms(tweets$time)
+glimpse(tweets)
+```
+
+# Exploratory Data Analysis (EDA)
+
+Analisi tweet (e retweet) in lingua inglese e spagnola. Alcuni tweet non sono stati presi in considerazione poichè troppo corti per riuscire ad individuare una lingua. Trump e Clinton hanno retweetato in inglese su alcuni tweet in lingua spagnola. Di seguito codice e output: 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+kable(tweets %>% group_by(lang) %>% count() %>% rename(Language = lang, 'Number of Tweets' = n))
+
+kable(head(tweets %>% filter(lang=="es" & original_author=="") %>% select(lang, is_retweet, handle, text) %>% rename(Language = lang),5), format="html")%>%
+  kable_styling() %>%
+  column_spec(1, bold = T, width = "2cm", border_right = T) %>%
+  column_spec(2, bold = T, width = "2cm", border_right = T) %>%
+  column_spec(3, bold = T, width = "2cm", border_right = T) %>%
+  column_spec(4, width = "19cm")
+
+tweets <- tweets %>% filter(lang != "es")
+
+tweets$handle <- sub("realDonaldTrump", "Trump", tweets$handle)
+tweets$handle <- sub("HillaryClinton", "Clinton", tweets$handle)
+tweets$is_retweet <- as.logical(tweets$is_retweet)
+
+kable(tweets %>% filter(is_retweet==FALSE) %>% group_by(handle) %>% count())
+```
+
+Analisi su individui retweetati (almeno 5 volte): 274 sono stati retweetati.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+p1 <- tweets %>% filter(original_author != "") %>% group_by(original_author) %>% count() %>% filter(n>=5) %>% arrange(desc(n)) %>% ungroup()
+
+ggplot(p1, aes(x=reorder(original_author, n), y=n)) +
+  geom_bar(stat="identity", fill="darkgreen") + coord_flip() +
+  labs(x="", y="Numero di Tweets retweetati da Trump o Clinton") +
+  theme(legend.position = "none")
+```
+
+Primi 20 tweet (non spagnoli).
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+tweets$author <- ifelse(tweets$original_author != "", tweets$original_author, tweets$handle)
+
+kable(head(tweets %>% select(author, handle, text), 20), format = "html") %>%
+        kable_styling() %>%
+        column_spec(1, bold = T, width = "2cm", border_right = T) %>%
+        column_spec(2, bold = T, width = "2cm", border_right = T) %>%
+        column_spec(3, width = "19cm")
+```
+
+Eliminazione regex
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#regex
+tweets$text[c(2,4)]
+
+tweets$text <- str_replace_all(tweets$text, "[\n]" , "") #rimozione nuove linee
+tweets$text <- str_replace_all(tweets$text, "&amp", "") # rimozione e commerciale
+#URLs inseriti alla fine e conteggio massimo fino a 140 caratteri
+tweets$text <- str_replace_all(tweets$text, "http.*" , "")
+
+tweets$text <- iconv(tweets$text, "latin1", "ASCII", sub="")
+```
+
+# Creazione vCorpus
+
+Un corpus è una raccolta di documenti, nel dominio <strong><em>tm</em></strong>, R lo riconosce come tipo di dati. Il VCorpus può essere facilmente realizzato con il pacchetto <strong><em>tm</em></strong>. Una colonna deve avere un ID documento univoco (e deve essere denominata doc_id), una colonna deve essere denominata "text" e tutte le altre variabili vengono archiviate come metadati. Ho realizzato corpus separati per i tweet di Clinton e Trump. Il primo su cui sto indagando è il "corpus di Trump".
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+tweets <- tweets %>% rename (doc_id = id)
+ClintonTweets <- tweets %>% filter(is_retweet=="FALSE" & handle=="Clinton")
+TrumpTweets <- tweets %>% filter(is_retweet=="FALSE" & handle=="Trump")
+
+TrumpCorpus <- DataframeSource(TrumpTweets)
+TrumpCorpus <- VCorpus(TrumpCorpus)
+
+ClintonCorpus <- DataframeSource(ClintonTweets)
+ClintonCorpus <- VCorpus(ClintonCorpus)
+
+TrumpCorpus
+```
+
+I primi 2 tweet hanno una lunghezza di 95 e 90 caratteri, usando la funzione <strong><em>inspect</em></strong>.
+Con la funzione <strong><em>content</em></strong>, posso visualizzare il contenuto, ad esempio, del primo tweet.
+
+Rimozione parole non significative inglesi:
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+print(sort(stopwords("en")))
+CleanCorpus <- function(x){
+     x <- tm_map(x, content_transformer(tolower))
+     x <- tm_map(x, removeNumbers) 
+     x <- tm_map(x, removeWords, tidytext::stop_words$word)
+     x <- tm_map(x, removePunctuation)
+     x <- tm_map(x, stripWhitespace)
+     return(x)
+}
+
+RemoveNames <- function(x) {
+       x <- tm_map(x, removeWords, c("donald", "hillary", "clinton", "trump", "realdonaldtrump", "hillaryclinton"))
+       return(x)
+}
+
+CreateTermsMatrix <- function(x) {
+        x <- TermDocumentMatrix(x)
+        x <- as.matrix(x)
+        y <- rowSums(x)
+        y <- sort(y, decreasing=TRUE)
+        return(y)
+}
+
+TrumpCorpus <- CleanCorpus(TrumpCorpus)
+TermFreqTrump <- CreateTermsMatrix(TrumpCorpus)
+
+content(TrumpCorpus[[1]])
+```
+
+Il pacchetto <strong><em>tidytext</em></strong> contiene un elenco di 1149 parole non significative inglesi.
+Text cleaning:
+
+<ul>
+<li>conversione di tutti i caratteri in minuscolo (non più maiuscole)</li>
+<li>rimozione dei numeri</li>
+<li>rimozione di tutte le parole non significative inglesi</li>
+<li>rimozione dela punteggiatura</li>
+<li>eliminazione di spazi bianchi</li>
+</ul>
+
+Creato anche un <strong><em>TermDocumentMatrix</em></strong>, che ha tutti i termini (rimanenti) come righe e tutti i documenti (tweet) come colonne. Per evitare la duplicazione del codice in seguito, ho creato le seguenti funzioni:
+
+<ul>
+<li>CleanCorpus() per la pulizia del corpus</li>
+<li>CreateTermsMatrix(): matrice dei termini</li>
+<li>RemoveNames(): rimozione nomi -> parole extra rimosse: Donald, Hillary, Clinton, Trump, realDonaldTrump, HillaryClinton</li>
+</ul>
+
+Top20 dei termini più usati da Trump:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+TrumpDF <- data.frame(word=names(TermFreqTrump), count=TermFreqTrump)
+
+TrumpDF[1:20,] %>%
+        ggplot(aes(x=(reorder(word, count)), y=count)) +
+        geom_bar(stat='identity', fill="blue") + coord_flip() + theme(legend.position = "none") +
+        labs(x="")
+```
+
+WordCloud (e anche versione 2):
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+set.seed(2018)
+
+TrumpCorpus1 <- RemoveNames(TrumpCorpus)
+TermFreqTrump <- CreateTermsMatrix(TrumpCorpus1)
+TrumpDF <- data.frame(word=names(TermFreqTrump), count=TermFreqTrump)
+
+
+wordcloud(TrumpDF$word, TrumpDF$count, max.words = 100, scale=c(2.5,.5), random.color = TRUE, colors=brewer.pal(9,"Set1"))
+
+wordcloud2::wordcloud2(TrumpDF[1:100,], color = "random-light", backgroundColor = "grey", shuffle=FALSE, size=0.4)
+```
+
+Parole più usate da Clinton:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+ClintonCorpus <- CleanCorpus(ClintonCorpus)
+TermFreqClinton <- CreateTermsMatrix(ClintonCorpus)
+
+ClintonDF <- data.frame(word=names(TermFreqClinton), count=TermFreqClinton)
+
+ClintonDF[1:20,] %>%
+        ggplot(aes(x=(reorder(word, count)), y=count)) +
+        geom_bar(stat='identity', fill="#FF1493") + coord_flip() + theme(legend.position = "none") +
+        labs(x="")
+```
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+ClintonCorpus1 <- RemoveNames(ClintonCorpus)
+TermFreqClinton <- CreateTermsMatrix(ClintonCorpus1)
+ClintonDF <- data.frame(word=names(TermFreqClinton), count=TermFreqClinton)
+
+wordcloud(ClintonDF$word, ClintonDF$count, max.words = 100, scale=c(2.5,.5), random.color = TRUE, colors=brewer.pal(9,"Set1"))
+```
+
+Comparazione dei wordcloud:
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+allClinton <- paste(ClintonTweets$text, collapse = " ")
+allTrump <- paste(TrumpTweets$text, collapse = " ")
+allClTr <- c(allClinton, allTrump)
+
+allClTr <- VectorSource(allClTr)
+allCorpus <- VCorpus(allClTr)
+allCorpus <- CleanCorpus(allCorpus)
+allCorpus <- RemoveNames(allCorpus)
+
+TermsAll <- TermDocumentMatrix(allCorpus)
+colnames(TermsAll) <- c("Clinton", "Trump")
+MatrixAll <- as.matrix(TermsAll)
+
+comparison.cloud(MatrixAll, colors = c("#FF1493", "blue"), scale=c(2.3,.3), max.words = 75)
+```
+
+# Bigrammi
+
+Conversione dei vCorpus di Trump e Clinton in <strong><em>tibble</em></strong>. Per entrambi sto creando tibble ordinati con e senza i nomi.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+TrumpTidy <- tidy(TrumpCorpus)
+ClintonTidy <- tidy(ClintonCorpus)
+TrumpTidy1 <- tidy(TrumpCorpus1) #senza nomi
+ClintonTidy1 <- tidy(ClintonCorpus1) #senza nomi
+```
+
+## Bigrammi: Donald Trump
+
+I 20 bigrammi più usati da Trump:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+plotBigrams <- function(tibble, topN=20, title="", color="#FF1493"){
+  x <- tibble %>% select(text) %>%
+    unnest_tokens(bigram, text, token = "ngrams", n = 2)
+  y <- x %>% count(bigram, sort = TRUE) %>% top_n(topN, wt=n) %>%
+    ggplot(aes(x=reorder(bigram, n), y=n)) +
+    geom_bar(stat='identity', fill=color) + coord_flip() +
+    theme(legend.position="none") + labs(x="", title=title)
+}
+
+b1 <- plotBigrams(TrumpTidy, title="con nomi", color="blue")
+b2 <- plotBigrams(TrumpTidy1, title="senza nomi", color="blue")
+
+grid.arrange(b1, b2, nrow=1)
+```
+
+## Bigrammi: Hillary Clinton
+
+I 20 bigrammi più usati da Hillary Clinton:
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+b1 <- plotBigrams(ClintonTidy, title="con nomi")
+b2 <- plotBigrams(ClintonTidy1, title="senza nomi")
+
+grid.arrange(b1, b2, nrow=1)
+```
+
+# Sentiment analysis
+
+Il pacchetto <strong><em>tidytext</em></strong> contiene diversi lessici nei dataset sui sentimenti.
+
+## Il lessico di Bing (positivo/negativo, binario)
+
+Il lessico bing classifica le parole in modo binario in categorie positive e negative.
+Presenta 2006 parole classificate come positive e 4783 parole come negative (fonte: https://arxiv.org/pdf/1901.08319.pdf).
+
+### Parole positive e negative usate più frequentemente
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+get_sentiments("bing")
+#aggiunta data dei tweets
+DocMetaTrump1 <- meta(TrumpCorpus1)
+DocMetaTrump1$date <- date(DocMetaTrump1$time)
+TrumpTidy1$date <- DocMetaTrump1$date
+
+DocMetaClinton1 <- meta(ClintonCorpus1)
+DocMetaClinton1$date <- date(DocMetaClinton1$time)
+ClintonTidy1$date <- DocMetaClinton1$date
+
+NoNamesTidy <- bind_rows(trump=TrumpTidy1, clinton=ClintonTidy1, .id="candidate")
+Words <- NoNamesTidy %>% unnest_tokens(word, text)
+
+Bing <- Words %>% inner_join(get_sentiments("bing"), by="word")
+
+b1 <- Bing %>% filter(candidate=="trump") %>% count(word, sentiment, sort=TRUE) %>%
+  group_by(sentiment) %>% arrange(desc(n)) %>% slice(1:20) %>%
+  ggplot(aes(x=reorder(word, n), y=n)) +
+  geom_col(aes(fill=sentiment), show.legend=FALSE) +
+  coord_flip() +
+  facet_wrap(~sentiment, scales="free_y") +
+  labs(x="", y="numero di volte usato", title="Parole più usate da Donald Trump") +
+  scale_fill_manual(values = c("positive"="green", "negative"="red"))
+b2 <- Bing %>% filter(candidate=="clinton") %>% count(word, sentiment, sort=TRUE) %>%
+  group_by(sentiment) %>% arrange(desc(n)) %>% slice(1:20) %>%
+  ggplot(aes(x=reorder(word, n), y=n)) +
+  geom_col(aes(fill=sentiment), show.legend=FALSE) +
+  coord_flip() +
+  facet_wrap(~sentiment, scales="free_y") +
+  labs(x="", y="numero di volte usato", title="Parole più usate da Hillary Clinton") +
+  scale_fill_manual(values = c("positive"="green", "negative"="red"))
+grid.arrange(b1, b2)
+```
+
+### Serie storica dei sentimenti
+
+In questa sezione vengono raggruppate le parole positive e negative per data.
+
+Hillary Clinton ha iniziato a pubblicare Tweet più tardi di Donald Trump. Il punteggio è il numero di parole positive meno il numero di parole negative menzionate in tutti i Tweet pubblicati in un determinato giorno. Sia per Clinton che per Trump non c'è davvero una tendenza al rialzo o al ribasso, ed entrambe le serie temporali si aggirano intorno alla linea "neutra". Sembra interessante la data di fine luglio in cui Clinton è stata molto positiva e Trump molto negativo. 
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+t1 <- Bing %>% filter(candidate=="trump") %>% group_by(date) %>% count(sentiment) %>%
+  spread(sentiment, n) %>% mutate(score=positive-negative) %>%
+  ggplot(aes(x=date, y=score)) +
+  scale_x_date(limits=c(as.Date("2016-01-05"), as.Date("2016-09-27")), date_breaks = "1 month", date_labels = "%b") +
+  geom_line(stat="identity", col="blue") + geom_smooth(col="red") + labs(title="Sentiment Donald Trump")
+
+t2 <- Bing %>% filter(candidate=="clinton") %>% group_by(date) %>% count(sentiment) %>%
+  spread(sentiment, n) %>% mutate(score=positive-negative) %>%
+  ggplot(aes(x=date, y=score)) +
+  scale_x_date(limits=c(as.Date("2016-01-05"), as.Date("2016-09-27")), date_breaks = "1 month", date_labels = "%b") +
+  geom_line(stat="identity", col="blue") + geom_smooth(col="red") + labs(title="Sentiment Hillary Clinton")
+
+grid.arrange(t1, t2, ncol=1)
+
+```
+
+# Conclusione
+
+Dopo aver eseguito:
+<ul>
+<li>la Data visualization con i confronti tra i tweet di Trump e Clinton</li>
+<li>il confronto dello score Bing con la Sentiment Analysis</li>
+</ul>
+
+possiamo concludere come i tweet di Trump siano mediamente più offensivi e meno pieni di parole positive (l'ultimo plot oscilla tra score= <strong><em>-30 e +10</em></strong>) rispetto a quelli di Clinton (l'ultimo plot oscilla tra score= <strong><em>-20 e +20</em></strong>). 
