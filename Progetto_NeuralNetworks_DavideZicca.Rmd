@@ -1,0 +1,128 @@
+---
+title: 'Progetto: Neural Networks'
+author: "Davide Zicca"
+date: "27/6/2021"
+output: pdf_document
+---
+
+
+# Motivazione e Data Visualization
+
+Da uno dei repository online di dataset per allenarsi con il Machine Learning, ho scelto il dataset: https://archive.ics.uci.edu/ml/machine-learning-databases/auto-mpg/auto-mpg.data. Esso contiene 392 osservazioni e 9 variabili. Si tratta di un dataset contenente info su autoveicoli. 
+La prima operazione eseguita è stata quindi quella di caricare il dataset su R e procedere con la data visualization:
+
+```{r echo=TRUE, warning=FALSE}
+AutoData <- read.table(url("https://archive.ics.uci.edu/ml/machine-learning-databases/auto-mpg/auto-mpg.data"), sep = "")
+names(AutoData)<- c("mpg","cylinders","displacement","horsepower","weight","acceleration",   
+                  "year","origin","name") 
+str(AutoData)
+
+AutoData<-AutoData[!(AutoData$horsepower=="?"),]
+AutoData$horsepower<-as.integer(AutoData$horsepower)
+str(AutoData)
+
+plot(AutoData$weight, AutoData$mpg, pch=AutoData$origin)
+
+par(mfrow=c(2,2))
+plot(AutoData$cylinders, AutoData$mpg, pch=AutoData$origin)
+plot(AutoData$displacement, AutoData$mpg, pch=AutoData$origin)
+plot(AutoData$horsepower, AutoData$mpg, pch=AutoData$origin)
+plot(AutoData$acceleration, AutoData$mpg, pch=AutoData$origin)
+dev.off()
+```
+
+# Fit del modello
+
+Prima di procedere alla modellazione, sono state calcolate:
+
+\begin{enumerate}
+\item media
+\item varianza
+\item \textit{scale} dei dati
+\item divisione del dataset in train e test
+\end{enumerate}
+
+```{r echo=TRUE, warning=FALSE}
+mean_data <- apply(AutoData[1:6], 2, mean)
+sd_data <- apply(AutoData[1:6], 2, sd)
+
+AutoDataScaled <- as.data.frame(scale(AutoData[,1:6],center = 
+                                        mean_data, scale = sd_data))
+head(AutoDataScaled, n=20)
+
+
+index = sample(1:nrow(AutoData),round(0.70*nrow(AutoData)))
+train_data <- as.data.frame(AutoDataScaled[index,])
+test_data <- as.data.frame(AutoDataScaled[-index,])
+
+n = names(AutoDataScaled)
+f = as.formula(paste("mpg ~", paste(n[!n %in% "mpg"], 
+                                    collapse = " + ")))
+library(neuralnet)
+NNRModel<-neuralnet(f,data=train_data,hidden=3,linear.output=TRUE)
+```
+
+Output del modello e plot:
+
+```{r echo=TRUE, warning=FALSE}
+summary(NNRModel)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+plot(NNRModel,cex=0.6,cex.axis=0.6,cex.lab=0.6)
+```
+
+Calcolo delle predizione e del MSE:
+
+```{r echo=TRUE, warning=FALSE}
+NNRModel$result.matrix
+
+PredNetTest <- compute(NNRModel,test_data[,2:6])
+
+MSE.net <- sum((test_data$mpg - PredNetTest$net.result)^2)/nrow(test_data)
+```
+
+
+# Confronto del modello neural network con una regressione lineare
+
+Fit della regressione lineare e calcolo MSE:
+
+```{r echo=TRUE, warning=FALSE}
+LModel <- lm(mpg~., data=train_data)
+summary(LModel)
+
+PredLModel <- predict(LModel,test_data)
+
+MSE.lm <- sum((PredLModel - test_data$mpg)^2)/nrow(test_data)
+```
+
+Confronto dell'errore quadratico medio del modello neural network e della regressione lineare:
+
+```{r echo=TRUE, warning=FALSE}
+MSE_netVSlm= as.data.frame(table(MSE.net, MSE.lm))
+MSE_netVSlm= subset(MSE_netVSlm, select = -Freq)
+MSE_netVSlm
+```
+
+Confronto grafico:
+
+\begin{enumerate}
+\item Modello Neural Network
+\item Modello Regressione Lineare
+\end{enumerate}
+
+
+```{r echo=TRUE, warning=FALSE}
+par(mfrow=c(1,2))
+plot(test_data$mpg,PredNetTest$net.result,col='black',main="Valori reali vs previsti",  
+     sub = "Modello Neural Network")
+abline(0,1,lwd=1)
+plot(test_data$mpg,PredLModel,col='black',main="Valori reali vs previsti",  
+     sub = "Modello Regressione Lineare")
+abline(0,1,lwd=1)
+```
+
+
+# Conclusione
+
+Dal confronto del MSE e dal confronto grafico si evince come il modello neural network abbia un MSE inferiore e, quindi, è da preferire rispetto alla regressione lineare Nel modello neuralnet i valori dei dati sono dispersi vicino al suo momento centrale (media), mentre nella regressione lineare i valori sono più dispersi.

@@ -1,0 +1,203 @@
+---
+title: "Earthquake_MissingValues_Project"
+author: "Davide Zicca"
+date: "21/04/2021"
+output: pdf_document
+---
+
+# Motivazione e caricamento dataset
+
+Obiettivo del seguente progetto è quello di mostrare l'eventuale presenza di Missing Value all'interno di un dataset. Il dataset proposto (fonte: https://www.kaggle.com/srijya/us-earthquake-intensity-database) contiene una collezione di dati di più di 23,000 Terremoti avvenuti negli USA. I dati raccolti presentano gli anni dal 1638 al 1985. Include anche informazioni su \textit{epicentral coordinates, magnitudes, focal depths, names and coordinates of reporting cities (or localities), reported intensities, and the distance from the city (or locality) to the epicenter}. Contiene informazioni anche di altri Stati come \textit{Antigua and Barbuda, Canada, Mexico, Panama, and the Philippines}.
+
+Procedo al caricamento del dataset e alla selezione di alcune delle tante variabili presenti nello stesso:
+
+```{r echo=TRUE}
+# SOURCE: https://www.kaggle.com/srijya/us-earthquake-intensity-database
+# setwd("C:/Davide/MASTER IN DATA SCIENCE/Materiale del Master/Missing Value/PROGETTO")
+library(readxl)
+eqint_tsqp <- read_excel("eqint_tsqp.xlsx", 
+                         sheet = "HAZ.EQINT_TSQP")
+df= eqint_tsqp
+# Missing values
+
+library(dplyr)
+# Seleziono le variabili di interesse 
+df_long <- df%>% select (YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, LATITUDE, 
+                             LONGITUDE, MAGNITUDE, EQ_DEPTH,EPIDIST, CITY_LAT,
+                             CITY_LON, STATE, CITY)
+# seleziono 500 indici casuali 
+rand_ind <- sample (1: nrow (df_long), 500) 
+df_1 <- df_long [rand_ind,]
+```
+
+# Verifica presenza Missing Value
+
+```{r echo=TRUE}
+# install.packages ("naniar")
+library(naniar)
+# Ci sono valori mancanti nel set di dati? 
+any_na (df_1) 
+# Quanti? 
+n_miss (df_1) 
+prop_miss (df_1) # proportion of missing values
+# Quali variabili sono interessate? 
+df_1%>% is.na ()%>% colSums ()
+
+# Ottieni il numero di missing per variabile (ne%) 
+miss_var_summary (df_1) 
+miss_var_table (df_1)
+# Ottieni il numero di missing per partecipante (ne%) 
+miss_case_summary (df_1) 
+miss_case_table (df_1)
+
+library(ggplot2)
+# Quali variabili contengono le variabili piÃ¹ mancanti? 
+gg_miss_var (df_1)
+
+# Dove si trovano gli oggetti mancanti? 
+vis_miss (df_1) + theme (axis.text.x = element_text (angle = 80))
+
+# Quali combinazioni di variabili mancano insieme? 
+gg_miss_upset (df_1)
+```
+
+# Metodo Alternativo
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# METODO ALTERNATIVO PER MOSTRARE I MISSING VALUE
+library(Amelia)
+
+missmap(df_1, main = "Earthwake Missing Values")
+```
+
+# Imputazione Multivariata
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+#install.packages ("mice") 
+library(mice) # Multivariate Imputation by Chained Equations
+pred_mat <- quickpred (df_1, mincor = 0,25)
+
+# mice 
+df_1_multimp <- mice(df_1, m = 10, meth = 'pmm', seed = 5, predittoreMatrix = pred_mat)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+# with   
+lm_multimp <- with (df_1_multimp, lm (MAGNITUDE ~ LATITUDE + LONGITUDE))
+# pool 
+lm_pooled <- pool (lm_multimp)
+
+summary(lm_pooled, conf.int = TRUE, conf.level = 0.95)
+
+stripplot (df_1_multimp, 
+           MAGNITUDE ~ LATITUDE | .imp, 
+           pch = 20, cex = 1)
+
+df <-mice :: complete (df_1_multimp, 1)
+
+library(tidyverse)
+# Dividi i dati in training e set di test 
+set.seed (123) 
+0.8 * nrow (df) 
+training.indices <- sample (1: nrow (df), 345) 
+train.data <- df [training.indices,] 
+test.data <- df [-training.indices,]
+# Costruisci il modello del 
+model <- lm (MAGNITUDE ~ LATITUDE + LONGITUDE, data = train.data) 
+# Riepiloga il modello 
+summary(model)
+
+# Fai previsioni 
+predizioni <- model%>% predict(test.data)
+# calcola l'errore di previsione, RMSE 
+sqrt (mean (model $ residuals ^ 2)) 
+```
+
+
+# Principal Component Analysis
+
+```{r echo=TRUE}
+df_1[] <- lapply(df_1, function(x) {
+  if(is.factor(x)) as.numeric(as.character(x)) else x
+})
+sapply(df_1, class)
+
+df_3= df_1[,1:10]
+#PCA with missing values
+library(missMDA)
+# estim_ncpPCA = Estimate the number of dimensions for the Principal Component 
+#Analysis by cross-validation
+# imputePCA= Impute dataset with PCA
+
+nb <- estim_ncpPCA(df_3,method.cv = "Kfold", verbose = FALSE) 
+# estimate the number of components from incomplete data
+#(available methods include GCV to approximate CV)
+nb$ncp 
+plot(0:5, nb$criterion, xlab = "nb dim", ylab = "MSEP")
+res.comp <- imputePCA(df_3, ncp = nb$ncp) 
+# iterativePCA algorithm
+res.comp$completeObs[1:3,] 
+# the imputed data set
+imp <- cbind.data.frame(res.comp$completeObs,df_3)
+df_4= imputePCA(df_3)
+library(FactoMineR)
+res.pca <- PCA(df_4, quanti.sup = 1, quali.sup = 12, ncp = nb$ncp, graph=FALSE)
+# plot(res.pca, hab=12, lab="quali")
+plot(res.pca, choix="var")
+head(res.pca$ind$coord) #scores (principal components)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Multiple imputation
+library(Amelia)
+# amelia= Multiple Imputation of Incomplete Multivariate Data
+res.amelia <- amelia(as.data.frame(df_3), m = 5)  
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(mice)
+imp.mice <- mice(df_3, m = 100, defaultMethod = "norm.boot") 
+```
+
+```{r echo=TRUE}
+# the variability of the parameters is obtained 
+# MIPCA= Multiple Imputation with PCA
+
+res.MIPCA <- MIPCA(df_3, ncp = 2, nboot = 100) # MI with PCA using 2 dimensions 
+#Inspect the imputed values
+
+plot(res.MIPCA,choice= "var")
+
+
+# Visualize the pattern
+library(VIM)
+
+aggr(df_3,only.miss=TRUE,numbers=TRUE,sortVar=TRUE)
+res <- summary(aggr(df_3,prop=TRUE,combined=TRUE))$combinations
+mis.ind <- matrix("o",nrow=nrow(df_3),ncol=ncol(df_3))
+mis.ind[is.na(df_3)] <- "m"
+dimnames(mis.ind) <- dimnames(df_3)
+library(FactoMineR)
+resMCA <- MCA(mis.ind)
+plot(resMCA,invis="ind",title="MCA graph of the categories")
+### Impute the incomplete data set
+library(missMDA)
+nb <- estim_ncpPCA(df_3,method.cv="Kfold",nbsim=100) 
+nb
+res.comp <- imputePCA(df_3,ncp=2)
+
+#Perform a PCA on the completed data set
+
+
+plot(res.pca, choix="var")
+# Compare with PCA on the data imputed by the mean
+PCA(df_4)
+#Categorical/mixed/multi-block data with missing values
+```
+
+
+# Conclusione
+
+Il dataset analizzato presentava molti valori NA che sono stati debitamente segnalati e visualizzati.
+
